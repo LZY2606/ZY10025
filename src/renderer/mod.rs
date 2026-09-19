@@ -22,6 +22,7 @@ pub(crate) mod graphics;
 pub(crate) mod source_map;
 pub(crate) mod stylesheet;
 
+pub mod events;
 mod margin;
 mod preprocess;
 mod styled_buffer;
@@ -37,6 +38,8 @@ pub(crate) use graphics::{LineAnnotation, LineAnnotationType, char_width, num_ov
 pub(crate) use stylesheet::Stylesheet;
 
 pub use anstyle::*;
+#[doc(no_inline)]
+pub use events::{EventKind, RenderEvent, RenderEvents, SourceRef};
 
 /// See [`Renderer::term_width`]
 pub const DEFAULT_TERM_WIDTH: usize = 140;

@@ -19,13 +19,13 @@ use crate::level::{Level, LevelInner};
 use crate::renderer::source_map::{
     AnnotatedLineInfo, LineInfo, Loc, SourceMap, SplicedLines, SubstitutionHighlight,
 };
-use crate::renderer::styled_buffer::StyledBuffer;
+use crate::renderer::styled_buffer::{CellMeta, CellSource, CellTag, StyledBuffer};
 use crate::snippet::Id;
 use crate::{
     Annotation, AnnotationKind, Element, Group, Message, Origin, Patch, Report, Snippet, Title,
 };
 
-const ANONYMIZED_LINE_NUM: &str = "LL";
+pub(crate) const ANONYMIZED_LINE_NUM: &str = "LL";
 
 pub(crate) fn render(renderer: &Renderer, groups: Report<'_>) -> String {
     if renderer.short_message {
@@ -48,16 +48,46 @@ pub(crate) fn render_full_message(renderer: &Renderer, groups: Report<'_>) -> St
     };
     let mut out_string = String::new();
     let group_len = groups.len();
-    for (
-        g,
-        PreprocessedGroup {
+    for (g, group) in groups.into_iter().enumerate() {
+        let (buffer, level) = layout_group(
+            renderer,
+            max_line_num_len,
+            group_len,
+            g,
+            report_primary_path,
+            group,
+        );
+        buffer
+            .render(&level, &renderer.stylesheet, &mut out_string)
+            .unwrap();
+        if g != group_len - 1 {
+            out_string.push('\n');
+        }
+    }
+    out_string
+}
+
+/// Lay out a single [`Group`] of a [`Report`] into a [`StyledBuffer`]
+///
+/// This is the shared layout pass behind both [`Renderer::render`] and
+/// [`Renderer::render_events`][crate::renderer::Renderer::render_events], so
+/// the string output and the structured events can never drift apart.
+#[allow(clippy::too_many_arguments, reason = "All arguments are necessary")]
+pub(crate) fn layout_group<'a>(
+    renderer: &Renderer,
+    max_line_num_len: usize,
+    group_len: usize,
+    g: usize,
+    report_primary_path: Option<&Cow<'_, str>>,
+    preprocessed_group: PreprocessedGroup<'a>,
+) -> (StyledBuffer, Level<'a>) {
+    {
+        let PreprocessedGroup {
             group,
             elements,
             primary_path,
             max_depth,
-        },
-    ) in groups.into_iter().enumerate()
-    {
+        } = preprocessed_group;
         let mut buffer = StyledBuffer::new();
         let level = group.primary_level.clone();
         let mut message_iter = elements.into_iter().enumerate().peekable();
@@ -227,17 +257,27 @@ pub(crate) fn render_full_message(renderer: &Renderer, groups: Report<'_>) -> St
                 }
             }
         }
-        buffer
-            .render(&level, &renderer.stylesheet, &mut out_string)
-            .unwrap();
-        if g != group_len - 1 {
-            out_string.push('\n');
-        }
+        (buffer, level)
     }
-    out_string
 }
 
 fn render_short_message(renderer: &Renderer, groups: &[Group<'_>]) -> Result<String, fmt::Error> {
+    let (buffer, level) = layout_short_message(renderer, groups);
+    let mut out_string = String::new();
+    buffer.render(&level, &renderer.stylesheet, &mut out_string)?;
+    Ok(out_string)
+}
+
+/// Lay out a [`Report`] in [`Renderer::short_message`] mode into a
+/// [`StyledBuffer`]
+///
+/// This is the shared layout pass behind both [`Renderer::render`] and
+/// [`Renderer::render_events`][crate::renderer::Renderer::render_events], so
+/// the string output and the structured events can never drift apart.
+pub(crate) fn layout_short_message<'a>(
+    renderer: &Renderer,
+    groups: &'a [Group<'a>],
+) -> (StyledBuffer, Level<'a>) {
     let mut buffer = StyledBuffer::new();
     let mut labels = None;
     let group = groups.first().expect("Expected at least one group");
@@ -312,10 +352,7 @@ fn render_short_message(renderer: &Renderer, groups: &[Group<'_>]) -> Result<Str
         buffer.append(0, &format!(": {labels}"), ElementStyle::NoStyle);
     }
 
-    let mut out_string = String::new();
-    buffer.render(&title.level, &renderer.stylesheet, &mut out_string)?;
-
-    Ok(out_string)
+    (buffer, title.level.clone())
 }
 
 #[allow(clippy::too_many_arguments, reason = "All arguments are necessary")]
@@ -536,6 +573,7 @@ fn render_snippet_annotations(
     is_cont: bool,
     is_first: bool,
 ) {
+    let source_id = buffer.intern_source(snippet.path.as_deref());
     if let Some(path) = &snippet.path {
         let mut origin = Origin::path(path.as_ref());
         // print out the span location and spacer before we print the annotated source
@@ -727,6 +765,7 @@ fn render_snippet_annotations(
             renderer,
             &annotated_lines[annotated_line_idx],
             buffer,
+            source_id,
             width_offset,
             code_offset,
             max_line_num_len,
@@ -800,16 +839,23 @@ fn render_snippet_annotations(
                 }
 
                 Ordering::Equal => {
-                    let unannotated_line = sm
-                        .get_line(annotated_lines[annotated_line_idx].line_index + 1)
-                        .unwrap_or("");
+                    let unannotated_line =
+                        sm.line_info(annotated_lines[annotated_line_idx].line_index + 1);
+                    let (unannotated_line, char_bytes) = normalize_attributed(
+                        unannotated_line.map_or("", |info| info.line),
+                        unannotated_line.map_or(0, |info| info.start_byte),
+                    );
 
                     let last_buffer_line_num = buffer.num_lines();
 
                     draw_line(
                         renderer,
                         buffer,
-                        &normalize_whitespace(unannotated_line),
+                        &unannotated_line,
+                        Some(SourceAttribution {
+                            source_id,
+                            char_bytes: &char_bytes,
+                        }),
                         annotated_lines[annotated_line_idx + 1].line_index - 1,
                         last_buffer_line_num,
                         width_offset,
@@ -863,6 +909,7 @@ fn render_source_line(
     renderer: &Renderer,
     line_info: &AnnotatedLineInfo<'_>,
     buffer: &mut StyledBuffer,
+    source_id: usize,
     width_offset: usize,
     code_offset: usize,
     max_line_num_len: usize,
@@ -884,7 +931,7 @@ fn render_source_line(
     //   |  vertical divider between the column number and the code
     //   column number
 
-    let source_string = normalize_whitespace(line_info.line);
+    let (source_string, char_bytes) = normalize_attributed(line_info.line, line_info.start_byte);
 
     let line_offset = buffer.num_lines();
 
@@ -892,6 +939,10 @@ fn render_source_line(
         renderer,
         buffer,
         &source_string,
+        Some(SourceAttribution {
+            source_id,
+            char_bytes: &char_bytes,
+        }),
         line_info.line_index,
         line_offset,
         width_offset,
@@ -1437,6 +1488,7 @@ fn render_source_line(
             // If the terminal is *too* small, we keep at least a tiny bit of the span for
             // display.
             let pad = max(margin.term_width / 3, MIN_PAD);
+            let previous_tag = buffer.set_tag(CellTag::Fold);
             // Code line
             buffer.replace(
                 line_offset,
@@ -1451,6 +1503,7 @@ fn render_source_line(
                 code_offset + (annotation.end.display - pad).saturating_sub(left),
                 renderer.decor_style.margin(),
             );
+            buffer.set_tag(previous_tag);
         }
     }
     annotations_position
@@ -1483,6 +1536,7 @@ fn emit_suggestion_default(
     is_first: bool,
     is_cont: bool,
 ) {
+    let previous_tag = buffer.set_tag(CellTag::Suggestion);
     let buffer_offset = buffer.num_lines();
     let mut row_num = buffer_offset + usize::from(!matches_previous_suggestion);
     let is_multiline = spliced_lines.complete.lines().count() > 1;
@@ -1629,11 +1683,12 @@ fn emit_suggestion_default(
 
                 let placeholder = renderer.decor_style.margin();
                 let padding = str_width(placeholder);
-                buffer.puts(
+                buffer.puts_meta(
                     row_num,
                     max_line_num_len.saturating_sub(padding),
                     placeholder,
                     ElementStyle::LineNumber,
+                    CellMeta::FOLD,
                 );
                 row_num += 1;
 
@@ -1752,11 +1807,12 @@ fn emit_suggestion_default(
     if lines.next().is_some() {
         let placeholder = renderer.decor_style.margin();
         let padding = str_width(placeholder);
-        buffer.puts(
+        buffer.puts_meta(
             row_num,
             max_line_num_len.saturating_sub(padding),
             placeholder,
             ElementStyle::LineNumber,
+            CellMeta::FOLD,
         );
     } else {
         let row = match show_code_change {
@@ -1771,6 +1827,7 @@ fn emit_suggestion_default(
             draw_col_separator_end(renderer, buffer, row, max_line_num_len + 1);
         }
     }
+    buffer.set_tag(previous_tag);
 }
 
 #[allow(clippy::too_many_arguments, reason = "All arguments are necessary")]
@@ -2011,6 +2068,7 @@ fn draw_line(
     renderer: &Renderer,
     buffer: &mut StyledBuffer,
     source_string: &str,
+    source: Option<SourceAttribution<'_>>,
     line_index: usize,
     line_offset: usize,
     width_offset: usize,
@@ -2028,9 +2086,15 @@ fn draw_line(
 
     let mut taken = 0;
     let mut skipped = 0;
-    let code: String = source_string
+    let mut char_bytes = source
+        .map(|s| s.char_bytes.iter().copied().map(Some))
+        .into_iter()
+        .flatten()
+        .chain(core::iter::repeat(None));
+    let code: Vec<(char, Option<usize>)> = source_string
         .chars()
-        .skip_while(|ch| {
+        .map(|ch| (ch, char_bytes.next().flatten()))
+        .skip_while(|(ch, _)| {
             let w = char_width(*ch);
             // If `skipped` is less than `left`, always skip the next `ch`,
             // even if `ch` is a multi-width char that would make `skipped`
@@ -2043,7 +2107,7 @@ fn draw_line(
                 false
             }
         })
-        .take_while(|ch| {
+        .take_while(|(ch, _)| {
             // Make sure that the trimming on the right will fall within the terminal width.
             taken += char_width(*ch);
             taken <= (right - left)
@@ -2055,43 +2119,55 @@ fn draw_line(
     }
     let placeholder = renderer.decor_style.margin();
     let padding = str_width(placeholder);
-    let (width_taken, bytes_taken) = if margin.was_cut_left() {
+    let (width_taken, chars_taken) = if margin.was_cut_left() {
         // We have stripped some code/whitespace from the beginning, make it clear.
-        let mut bytes_taken = 0;
+        let mut chars_taken = 0;
         let mut width_taken = 0;
-        for ch in code.chars() {
-            width_taken += char_width(ch);
-            bytes_taken += ch.len_utf8();
+        for (ch, _) in &code {
+            width_taken += char_width(*ch);
+            chars_taken += 1;
 
             if width_taken >= padding {
                 break;
             }
         }
 
-        buffer.puts(
+        buffer.puts_meta(
             line_offset,
             code_offset,
             placeholder,
             ElementStyle::LineNumber,
+            CellMeta::FOLD,
         );
-        (width_taken, bytes_taken)
+        (width_taken, chars_taken)
     } else {
         (0, 0)
     };
 
-    buffer.puts(
-        line_offset,
-        code_offset + width_taken,
-        &code[bytes_taken..],
-        ElementStyle::Quotation,
-    );
+    for (i, (ch, byte)) in code[chars_taken..].iter().enumerate() {
+        let meta = match (source, byte) {
+            (Some(source), Some(byte)) => CellMeta::source(CellSource {
+                source_id: source.source_id,
+                byte_start: *byte,
+                byte_end: *byte + ch.len_utf8(),
+            }),
+            _ => CellMeta::NONE,
+        };
+        buffer.putc_meta(
+            line_offset,
+            code_offset + width_taken + i,
+            *ch,
+            ElementStyle::Quotation,
+            meta,
+        );
+    }
 
     if line_len > right {
         // We have stripped some code/whitespace from the beginning, make it clear.
         let mut char_taken = 0;
         let mut width_taken_inner = 0;
-        for ch in code.chars().rev() {
-            width_taken_inner += char_width(ch);
+        for (ch, _) in code.iter().rev() {
+            width_taken_inner += char_width(*ch);
             char_taken += 1;
 
             if width_taken_inner >= padding {
@@ -2099,11 +2175,12 @@ fn draw_line(
             }
         }
 
-        buffer.puts(
+        buffer.puts_meta(
             line_offset,
-            code_offset + width_taken + code[bytes_taken..].chars().count() - char_taken,
+            code_offset + width_taken + (code.len() - chars_taken) - char_taken,
             placeholder,
             ElementStyle::LineNumber,
+            CellMeta::FOLD,
         );
     }
 
@@ -2159,7 +2236,16 @@ fn draw_multiline_line(
             }
         }
     };
-    buffer.putc(line, offset + depth - 1, chr, style);
+    buffer.putc_meta(
+        line,
+        offset + depth - 1,
+        chr,
+        style,
+        CellMeta {
+            source: None,
+            tag: CellTag::Sidebar { depth },
+        },
+    );
 }
 
 fn draw_col_separator(renderer: &Renderer, buffer: &mut StyledBuffer, line: usize, col: usize) {
@@ -2286,7 +2372,7 @@ fn draw_line_separator(renderer: &Renderer, buffer: &mut StyledBuffer, line: usi
         DecorStyle::Ascii => (0, "..."),
         DecorStyle::Unicode => (col - 2, "┆"),
     };
-    buffer.puts(line, column, dots, ElementStyle::LineNumber);
+    buffer.puts_meta(line, column, dots, ElementStyle::LineNumber, CellMeta::FOLD);
 }
 
 trait MessageOrTitle {
@@ -2336,7 +2422,7 @@ fn extra_width_from_tabs(s: &str, n: usize) -> usize {
 // we're higher. If the loop isn't exited by the `return`, the last multiplication will wrap, which
 // is OK, because while we cannot fit a higher power of 10 in a usize, the loop will end anyway.
 // This is also why we need the max number of decimal digits within a `usize`.
-fn num_decimal_digits(num: Option<usize>) -> usize {
+pub(crate) fn num_decimal_digits(num: Option<usize>) -> usize {
     #[cfg(target_pointer_width = "64")]
     const MAX_DIGITS: usize = 20;
 
@@ -2549,10 +2635,7 @@ const OUTPUT_REPLACEMENTS: &[(char, &str)] = &[
 ];
 
 pub(crate) fn normalize_whitespace(s: &str) -> Cow<'_, str> {
-    if !s
-        .chars()
-        .any(|user| OUTPUT_REPLACEMENTS.iter().any(|(bad, _)| user == *bad))
-    {
+    if !s.chars().any(|user| output_replacement(user).is_some()) {
         return Cow::Borrowed(s);
     }
 
@@ -2567,6 +2650,44 @@ pub(crate) fn normalize_whitespace(s: &str) -> Cow<'_, str> {
         s
     });
     Cow::Owned(normalized)
+}
+
+fn output_replacement(c: char) -> Option<&'static str> {
+    OUTPUT_REPLACEMENTS
+        .binary_search_by_key(&c, |(k, _)| *k)
+        .ok()
+        .map(|i| OUTPUT_REPLACEMENTS[i].1)
+}
+
+/// Attribution for a source line being drawn by `draw_line`
+///
+/// `char_bytes` holds the byte offset of every char of the normalized line
+/// within its source, so that rendered cells can be mapped back to the
+/// original source text.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SourceAttribution<'a> {
+    pub(crate) source_id: usize,
+    pub(crate) char_bytes: &'a [usize],
+}
+
+/// Like [`normalize_whitespace`], but also tracks the byte offset of every
+/// normalized char within the original source
+///
+/// Chars introduced by replacing whitespace (e.g. a tab becomes four spaces)
+/// all point at the byte offset of the char they were expanded from.
+pub(crate) fn normalize_attributed(
+    line: &str,
+    line_start_byte: usize,
+) -> (Cow<'_, str>, Vec<usize>) {
+    let normalized = normalize_whitespace(line);
+    let mut char_bytes = Vec::with_capacity(normalized.chars().count());
+    let mut byte = line_start_byte;
+    for c in line.chars() {
+        let width = output_replacement(c).map_or(1, |r| r.chars().count());
+        char_bytes.extend(core::iter::repeat_n(byte, width));
+        byte += c.len_utf8();
+    }
+    (normalized, char_bytes)
 }
 
 #[derive(Clone, Copy, Debug, PartialOrd, Ord, PartialEq, Eq)]

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 <!-- next-header -->
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- Structured rendering events via `Renderer::render_events`, exposing the
+  same layout as `Renderer::render` as a stream of `RenderEvent`s with
+  visible text, style, source byte ranges, output positions, sidebar depth,
+  fold markers, and suggestions; see `renderer::events` and
+  `examples/structured.rs`
+
 ## [0.12.16] - 2026-05-06
 
 ### Fixed

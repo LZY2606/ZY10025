@@ -1,0 +1,63 @@
+<svg width="1222px" height="398px" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .fg { fill: #AAAAAA }
+    .bg { fill: #000000 }
+    .container {
+      padding: 0 10px;
+      line-height: 18px;
+    }
+    tspan {
+      font: 14px SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace;
+      white-space: pre;
+      line-height: 18px;
+    }
+  </style>
+
+  <rect width="100%" height="100%" y="0" rx="4.5" class="bg" />
+
+  <text xml:space="preserve" class="container fg">
+    <tspan x="10px" y="28px"><tspan>[</tspan>
+</tspan>
+    <tspan x="10px" y="46px"><tspan>  {"group":0,"line":0,"column":0,"kind":"header","text":"error[E0308]","source":null},</tspan>
+</tspan>
+    <tspan x="10px" y="64px"><tspan>  {"group":0,"line":0,"column":12,"kind":"header","text":": mismatched types","source":null},</tspan>
+</tspan>
+    <tspan x="10px" y="82px"><tspan>  {"group":0,"line":1,"column":0,"kind":"text","text":" ","source":null},</tspan>
+</tspan>
+    <tspan x="10px" y="100px"><tspan>  {"group":0,"line":1,"column":1,"kind":"line_number","text":"--&gt; ","source":null},</tspan>
+</tspan>
+    <tspan x="10px" y="118px"><tspan>  {"group":0,"line":1,"column":5,"kind":"origin","text":"src/main.rs:1:14","source":null},</tspan>
+</tspan>
+    <tspan x="10px" y="136px"><tspan>  {"group":0,"line":2,"column":0,"kind":"text","text":"  ","source":null},</tspan>
+</tspan>
+    <tspan x="10px" y="154px"><tspan>  {"group":0,"line":2,"column":2,"kind":"line_number","text":"|","source":null},</tspan>
+</tspan>
+    <tspan x="10px" y="172px"><tspan>  {"group":0,"line":3,"column":0,"kind":"line_number","text":"1","source":null},</tspan>
+</tspan>
+    <tspan x="10px" y="190px"><tspan>  {"group":0,"line":3,"column":1,"kind":"text","text":" ","source":null},</tspan>
+</tspan>
+    <tspan x="10px" y="208px"><tspan>  {"group":0,"line":3,"column":2,"kind":"line_number","text":"|","source":null},</tspan>
+</tspan>
+    <tspan x="10px" y="226px"><tspan>  {"group":0,"line":3,"column":3,"kind":"text","text":" ","source":null},</tspan>
+</tspan>
+    <tspan x="10px" y="244px"><tspan>  {"group":0,"line":3,"column":4,"kind":"source","text":"let x: u32 = \"hi\";","source":{"origin":"src/main.rs","byte_start":0,"byte_end":18}},</tspan>
+</tspan>
+    <tspan x="10px" y="262px"><tspan>  {"group":0,"line":4,"column":0,"kind":"text","text":"  ","source":null},</tspan>
+</tspan>
+    <tspan x="10px" y="280px"><tspan>  {"group":0,"line":4,"column":2,"kind":"line_number","text":"|","source":null},</tspan>
+</tspan>
+    <tspan x="10px" y="298px"><tspan>  {"group":0,"line":4,"column":3,"kind":"text","text":"              ","source":null},</tspan>
+</tspan>
+    <tspan x="10px" y="316px"><tspan>  {"group":0,"line":4,"column":17,"kind":"underline","text":"^^^^","source":null},</tspan>
+</tspan>
+    <tspan x="10px" y="334px"><tspan>  {"group":0,"line":4,"column":21,"kind":"text","text":" ","source":null},</tspan>
+</tspan>
+    <tspan x="10px" y="352px"><tspan>  {"group":0,"line":4,"column":22,"kind":"label","text":"expected `u32`","source":null}</tspan>
+</tspan>
+    <tspan x="10px" y="370px"><tspan>]</tspan>
+</tspan>
+    <tspan x="10px" y="388px">
+</tspan>
+  </text>
+
+</svg>

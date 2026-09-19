@@ -61,6 +61,10 @@ impl<'a> SourceMap<'a> {
             .map(|info| info.line)
     }
 
+    pub(crate) fn line_info(&self, idx: usize) -> Option<&LineInfo<'a>> {
+        self.lines.iter().find(|l| l.line_index == idx)
+    }
+
     pub(crate) fn span_to_locations(&self, span: Range<usize>) -> (Loc, Loc) {
         let start_info = self
             .lines
@@ -164,6 +168,7 @@ impl<'a> SourceMap<'a> {
             .map(|info| AnnotatedLineInfo {
                 line: info.line,
                 line_index: info.line_index,
+                start_byte: info.start_byte,
                 annotations: vec![],
                 keep: false,
             })
@@ -346,6 +351,7 @@ impl<'a> SourceMap<'a> {
             annotated_line_infos.push(AnnotatedLineInfo {
                 line: info.line,
                 line_index,
+                start_byte: info.start_byte,
                 annotations: vec![line_ann],
                 keep: false,
             });
@@ -368,6 +374,7 @@ impl<'a> SourceMap<'a> {
             annotated_line_infos.push(AnnotatedLineInfo {
                 line: info.line,
                 line_index,
+                start_byte: info.start_byte,
                 annotations: vec![],
                 keep: true,
             });
@@ -645,6 +652,7 @@ pub(crate) struct LineInfo<'a> {
 pub(crate) struct AnnotatedLineInfo<'a> {
     pub(crate) line: &'a str,
     pub(crate) line_index: usize,
+    pub(crate) start_byte: usize,
     pub(crate) annotations: Vec<LineAnnotation<'a>>,
     pub(crate) keep: bool,
 }
