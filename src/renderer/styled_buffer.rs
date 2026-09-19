@@ -15,17 +15,66 @@ pub(crate) struct StyledBuffer {
     lines: Vec<Vec<StyledChar>>,
 }
 
+/// Where a rendered character comes from within the original source text.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SourcePoint {
+    /// Index into the render's source table.
+    pub(crate) source: u16,
+    /// 1-based line number within the source.
+    pub(crate) line: u32,
+    /// Byte offset of the source character this glyph derives from.
+    pub(crate) byte: u32,
+    /// Byte offset one past the source character this glyph derives from.
+    pub(crate) byte_end: u32,
+    /// Display column of the source character within its source line.
+    pub(crate) display: u32,
+    /// Display column one past the source character within its source line.
+    pub(crate) display_end: u32,
+}
+
+/// The decorative role of a rendered character, if any.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) enum Decor {
+    /// Regular content; classify by style instead.
+    #[default]
+    None,
+    /// A line number in the gutter.
+    LineNumber,
+    /// A vertical sidebar bar at the given multiline-annotation depth
+    /// (`0` is the main gutter).
+    Sidebar(u16),
+    /// An elision marker for folded-away content (`...`, `...`, `┆`).
+    Fold,
+    /// Other structural separators (arrows, note separators, ...).
+    Separator,
+}
+
+/// Extra per-character information used to produce structured events.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct CharMeta {
+    pub(crate) source: Option<SourcePoint>,
+    pub(crate) decor: Decor,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct StyledChar {
-    ch: char,
-    style: ElementStyle,
+    pub(crate) ch: char,
+    pub(crate) style: ElementStyle,
+    pub(crate) meta: CharMeta,
 }
 
 impl StyledChar {
     pub(crate) const SPACE: Self = Self::new(' ', ElementStyle::NoStyle);
 
     pub(crate) const fn new(ch: char, style: ElementStyle) -> Self {
-        Self { ch, style }
+        Self {
+            ch,
+            style,
+            meta: CharMeta {
+                source: None,
+                decor: Decor::None,
+            },
+        }
     }
 }
 
@@ -51,7 +100,7 @@ impl StyledBuffer {
 
         for (i, line) in self.lines.iter().enumerate() {
             let mut current_style = stylesheet.none;
-            for StyledChar { ch, style } in line {
+            for StyledChar { ch, style, .. } in line {
                 let ch_style = style.color_spec(level, stylesheet);
                 if ch_style != current_style {
                     if !line.is_empty() {
@@ -74,17 +123,74 @@ impl StyledBuffer {
     /// If `line` does not exist in our buffer, adds empty lines up to the given
     /// and fills the last line with unstyled whitespace.
     pub(crate) fn putc(&mut self, line: usize, col: usize, chr: char, style: ElementStyle) {
+        self.putc_meta(line, col, chr, style, CharMeta::default());
+    }
+
+    /// Like [`Self::putc`], additionally recording structured-rendering metadata.
+    pub(crate) fn putc_meta(
+        &mut self,
+        line: usize,
+        col: usize,
+        chr: char,
+        style: ElementStyle,
+        meta: CharMeta,
+    ) {
         self.ensure_lines(line);
         if col >= self.lines[line].len() {
             self.lines[line].resize(col + 1, StyledChar::SPACE);
         }
-        self.lines[line][col] = StyledChar::new(chr, style);
+        self.lines[line][col] = StyledChar { ch: chr, style, meta };
     }
 
     /// Sets `string` with `style` for given `line`, starting from `col`.
     /// If `line` does not exist in our buffer, adds empty lines up to the given
     /// and fills the last line with unstyled whitespace.
     pub(crate) fn puts(&mut self, line: usize, col: usize, string: &str, style: ElementStyle) {
+        self.puts_with(line, col, string, style, |_| CharMeta::default());
+    }
+
+    /// Like [`Self::puts`], marking every character with the same decorative role.
+    pub(crate) fn puts_decor(
+        &mut self,
+        line: usize,
+        col: usize,
+        string: &str,
+        style: ElementStyle,
+        decor: Decor,
+    ) {
+        self.puts_with(line, col, string, style, |_| CharMeta {
+            source: None,
+            decor,
+        });
+    }
+
+    /// Like [`Self::puts`], recording the source provenance of each character.
+    ///
+    /// `provenance` must have exactly one entry per `char` of `string`.
+    pub(crate) fn puts_src(
+        &mut self,
+        line: usize,
+        col: usize,
+        string: &str,
+        style: ElementStyle,
+        provenance: &[SourcePoint],
+    ) {
+        debug_assert_eq!(provenance.len(), string.chars().count());
+        let mut provenance = provenance.iter().copied();
+        self.puts_with(line, col, string, style, |_| CharMeta {
+            source: provenance.next(),
+            decor: Decor::None,
+        });
+    }
+
+    fn puts_with(
+        &mut self,
+        line: usize,
+        col: usize,
+        string: &str,
+        style: ElementStyle,
+        mut meta: impl FnMut(usize) -> CharMeta,
+    ) {
         if string.is_empty() {
             // don't add trailing whitespace (from column offset) for blank strings
             return;
@@ -100,7 +206,11 @@ impl StyledBuffer {
 
         for (offset, chr) in string.chars().enumerate() {
             let col = col + offset;
-            line[col] = StyledChar::new(chr, style);
+            line[col] = StyledChar {
+                ch: chr,
+                style,
+                meta: meta(offset),
+            };
         }
     }
 
@@ -115,6 +225,22 @@ impl StyledBuffer {
         }
     }
 
+    /// Like [`Self::append`], marking every character with the same decorative role.
+    pub(crate) fn append_decor(
+        &mut self,
+        line: usize,
+        string: &str,
+        style: ElementStyle,
+        decor: Decor,
+    ) {
+        if line >= self.lines.len() {
+            self.puts_decor(line, 0, string, style, decor);
+        } else {
+            let col = self.lines[line].len();
+            self.puts_decor(line, col, string, style, decor);
+        }
+    }
+
     pub(crate) fn replace(&mut self, line: usize, start: usize, end: usize, string: &str) {
         if start == end {
             return;
@@ -126,14 +252,24 @@ impl StyledBuffer {
         };
         self.lines[line].splice(
             start..end,
-            string
-                .chars()
-                .map(|c| StyledChar::new(c, ElementStyle::LineNumber)),
+            string.chars().map(|c| StyledChar {
+                ch: c,
+                style: ElementStyle::LineNumber,
+                meta: CharMeta {
+                    source: None,
+                    decor: Decor::Fold,
+                },
+            }),
         );
     }
 
     pub(crate) fn num_lines(&self) -> usize {
         self.lines.len()
+    }
+
+    /// The rendered lines, for structured event emission.
+    pub(crate) fn lines(&self) -> &[Vec<StyledChar>] {
+        &self.lines
     }
 
     /// Set `style` for `line`, `col_start..col_end` range if:

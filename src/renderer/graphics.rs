@@ -19,7 +19,7 @@ use crate::level::{Level, LevelInner};
 use crate::renderer::source_map::{
     AnnotatedLineInfo, LineInfo, Loc, SourceMap, SplicedLines, SubstitutionHighlight,
 };
-use crate::renderer::styled_buffer::StyledBuffer;
+use crate::renderer::styled_buffer::{CharMeta, Decor, SourcePoint, StyledBuffer};
 use crate::snippet::Id;
 use crate::{
     Annotation, AnnotationKind, Element, Group, Message, Origin, Patch, Report, Snippet, Title,
@@ -27,26 +27,71 @@ use crate::{
 
 const ANONYMIZED_LINE_NUM: &str = "LL";
 
+/// The laid-out result of rendering a [`Report`], shared by the string and
+/// structured-event representations so they can never drift apart.
+pub(crate) struct Rendered<'a> {
+    pub(crate) groups: Vec<RenderedGroup<'a>>,
+    /// Source (by id) that rendered characters can point back into.
+    pub(crate) sources: Vec<Option<&'a str>>,
+}
+
+pub(crate) struct RenderedGroup<'a> {
+    pub(crate) buffer: StyledBuffer,
+    pub(crate) level: Level<'a>,
+}
+
 pub(crate) fn render(renderer: &Renderer, groups: Report<'_>) -> String {
+    let rendered = render_all(renderer, groups);
+    let mut out_string = String::new();
+    let group_len = rendered.groups.len();
+    for (g, group) in rendered.groups.iter().enumerate() {
+        group
+            .buffer
+            .render(&group.level, &renderer.stylesheet, &mut out_string)
+            .unwrap();
+        if g != group_len - 1 {
+            out_string.push('\n');
+        }
+    }
+    out_string
+}
+
+pub(crate) fn render_all<'a>(renderer: &Renderer, groups: Report<'a>) -> Rendered<'a> {
     if renderer.short_message {
-        render_short_message(renderer, groups).unwrap()
+        render_short_message(renderer, groups)
     } else {
         render_full_message(renderer, groups)
     }
 }
 
-pub(crate) fn render_full_message(renderer: &Renderer, groups: Report<'_>) -> String {
+pub(crate) fn render_full_message<'a>(renderer: &Renderer, groups: Report<'a>) -> Rendered<'a> {
     let Preprocessed {
         max_line_num,
         report_primary_path,
         groups,
     } = Preprocessed::preprocess(groups);
+    // Assign every referenced source a stable id so rendered characters can
+    // point back into the original source text.
+    let mut sources: Vec<Option<&str>> = Vec::new();
+    for group in &groups {
+        for element in &group.elements {
+            match element {
+                PreprocessedElement::Cause((cause, _, _)) => {
+                    source_id(&mut sources, cause.path.as_deref());
+                }
+                PreprocessedElement::Suggestion((suggestion, _, _, _)) => {
+                    source_id(&mut sources, suggestion.path.as_deref());
+                }
+                _ => {}
+            }
+        }
+    }
     let max_line_num_len = if renderer.anonymized_snippet_line_numbers {
         ANONYMIZED_LINE_NUM.len()
     } else {
         num_decimal_digits(max_line_num)
     };
-    let mut out_string = String::new();
+    let mut rendered_groups = Vec::with_capacity(groups.len());
     let group_len = groups.len();
     for (
         g,
@@ -130,6 +175,7 @@ pub(crate) fn render_full_message(renderer: &Renderer, groups: Report<'_>) -> St
                         max_depth,
                         peek.is_some() || (g == 0 && group_len > 1),
                         is_first,
+                        find_source(&sources, cause.path.as_deref()),
                     );
 
                     if g == 0 {
@@ -174,6 +220,7 @@ pub(crate) fn render_full_message(renderer: &Renderer, groups: Report<'_>) -> St
                         is_first,
                         //matches!(peek, Some(Element::Message(_) | Element::Padding(_))),
                         peek.is_some(),
+                        find_source(&sources, suggestion.path.as_deref()),
                     );
 
                     if matches!(peek, Some(PreprocessedElement::Suggestion(_))) {
@@ -227,17 +274,81 @@ pub(crate) fn render_full_message(renderer: &Renderer, groups: Report<'_>) -> St
                 }
             }
         }
-        buffer
-            .render(&level, &renderer.stylesheet, &mut out_string)
-            .unwrap();
-        if g != group_len - 1 {
-            out_string.push('\n');
-        }
+        rendered_groups.push(RenderedGroup { buffer, level });
     }
-    out_string
+    Rendered {
+        groups: rendered_groups,
+        sources,
+    }
 }
 
-fn render_short_message(renderer: &Renderer, groups: &[Group<'_>]) -> Result<String, fmt::Error> {
+fn source_id<'a>(sources: &mut Vec<Option<&'a str>>, path: Option<&'a str>) -> u16 {
+    if let Some(id) = sources.iter().position(|p| *p == path) {
+        return u16::try_from(id).unwrap_or(u16::MAX);
+    }
+    sources.push(path);
+    u16::try_from(sources.len() - 1).unwrap_or(u16::MAX)
+}
+
+fn find_source(sources: &[Option<&str>], path: Option<&str>) -> u16 {
+    let id = sources
+        .iter()
+        .position(|p| *p == path)
+        .expect("all sources were registered before rendering");
+    u16::try_from(id).unwrap_or(u16::MAX)
+}
+
+/// A line of original source text being rendered, used to track which source
+/// character each rendered character derives from.
+#[derive(Clone, Copy)]
+struct SrcLine {
+    source: u16,
+    line: usize,
+    byte_start: usize,
+}
+
+impl SrcLine {
+    fn new(source: u16, line: usize, byte_start: usize) -> Self {
+        Self {
+            source,
+            line,
+            byte_start,
+        }
+    }
+
+    /// Map every `char` of `normalize_whitespace(line)` back to the source
+    /// character it derives from, keeping display columns and byte offsets
+    /// distinct (tabs, wide characters, and replaced control characters all
+    /// render differently from their source form).
+    fn provenance(self, line: &str) -> Vec<SourcePoint> {
+        let mut provenance = Vec::with_capacity(line.len());
+        let mut byte = self.byte_start;
+        let mut display = 0_usize;
+        for ch in line.chars() {
+            let width = char_width(ch);
+            let count = match OUTPUT_REPLACEMENTS.binary_search_by_key(&ch, |(k, _)| *k) {
+                Ok(i) => OUTPUT_REPLACEMENTS[i].1.chars().count(),
+                Err(_) => 1,
+            };
+            for i in 0..count {
+                provenance.push(SourcePoint {
+                    source: self.source,
+                    line: u32::try_from(self.line).unwrap_or(u32::MAX),
+                    byte: u32::try_from(byte).unwrap_or(u32::MAX),
+                    byte_end: u32::try_from(byte + ch.len_utf8()).unwrap_or(u32::MAX),
+                    display: u32::try_from(display + width * i / count).unwrap_or(u32::MAX),
+                    display_end: u32::try_from(display + width * (i + 1) / count)
+                        .unwrap_or(u32::MAX),
+                });
+            }
+            byte += ch.len_utf8();
+            display += width;
+        }
+        provenance
+    }
+}
+
+fn render_short_message<'a>(renderer: &Renderer, groups: &[Group<'a>]) -> Rendered<'a> {
     let mut buffer = StyledBuffer::new();
     let mut labels = None;
     let group = groups.first().expect("Expected at least one group");
@@ -312,10 +423,13 @@ fn render_short_message(renderer: &Renderer, groups: &[Group<'_>]) -> Result<Str
         buffer.append(0, &format!(": {labels}"), ElementStyle::NoStyle);
     }
 
-    let mut out_string = String::new();
-    buffer.render(&title.level, &renderer.stylesheet, &mut out_string)?;
-
-    Ok(out_string)
+    Rendered {
+        groups: vec![RenderedGroup {
+            buffer,
+            level: title.level.clone(),
+        }],
+        sources: Vec::new(),
+    }
 }
 
 #[allow(clippy::too_many_arguments, reason = "All arguments are necessary")]
@@ -467,10 +581,11 @@ fn render_origin(
         }
 
         if is_primary {
-            buffer.append(
+            buffer.append_decor(
                 buffer_msg_line_offset,
                 renderer.decor_style.file_start(is_first, alone),
                 ElementStyle::LineNumber,
+                Decor::Separator,
             );
         } else {
             // if !origin.standalone {
@@ -493,10 +608,11 @@ fn render_origin(
             //     buffer_msg_line_offset += 1;
             // }
             // Then, the secondary file indicator
-            buffer.append(
+            buffer.append_decor(
                 buffer_msg_line_offset,
                 renderer.decor_style.secondary_file_start(),
                 ElementStyle::LineNumber,
+                Decor::Separator,
             );
         }
     }
@@ -535,6 +651,7 @@ fn render_snippet_annotations(
     multiline_depth: usize,
     is_cont: bool,
     is_first: bool,
+    source: u16,
 ) {
     if let Some(path) = &snippet.path {
         let mut origin = Origin::path(path.as_ref());
@@ -608,11 +725,12 @@ fn render_snippet_annotations(
         let buffer_msg_line_offset = buffer.num_lines();
         if is_primary {
             if renderer.decor_style == DecorStyle::Unicode {
-                buffer.puts(
+                buffer.puts_decor(
                     buffer_msg_line_offset,
                     max_line_num_len,
                     renderer.decor_style.file_start(is_first, false),
                     ElementStyle::LineNumber,
+                    Decor::Separator,
                 );
             } else {
                 draw_col_separator_no_space(
@@ -640,11 +758,12 @@ fn render_snippet_annotations(
                 max_line_num_len + 1,
             );
 
-            buffer.puts(
+            buffer.puts_decor(
                 buffer_msg_line_offset + 1,
                 max_line_num_len,
                 renderer.decor_style.secondary_file_start(),
                 ElementStyle::LineNumber,
+                Decor::Separator,
             );
         }
     }
@@ -727,12 +846,14 @@ fn render_snippet_annotations(
             renderer,
             &annotated_lines[annotated_line_idx],
             buffer,
+            sm,
             width_offset,
             code_offset,
             max_line_num_len,
             margin,
             !is_cont && annotated_line_idx + 1 == annotated_lines.len(),
             snippet.line_numbering,
+            source,
         );
 
         let mut to_add = BTreeMap::new();
@@ -800,9 +921,9 @@ fn render_snippet_annotations(
                 }
 
                 Ordering::Equal => {
-                    let unannotated_line = sm
-                        .get_line(annotated_lines[annotated_line_idx].line_index + 1)
-                        .unwrap_or("");
+                    let unannotated_line_index =
+                        annotated_lines[annotated_line_idx].line_index + 1;
+                    let unannotated_line = sm.get_line(unannotated_line_index).unwrap_or("");
 
                     let last_buffer_line_num = buffer.num_lines();
 
@@ -810,6 +931,7 @@ fn render_snippet_annotations(
                         renderer,
                         buffer,
                         &normalize_whitespace(unannotated_line),
+                        unannotated_line,
                         annotated_lines[annotated_line_idx + 1].line_index - 1,
                         last_buffer_line_num,
                         width_offset,
@@ -817,6 +939,8 @@ fn render_snippet_annotations(
                         max_line_num_len,
                         margin,
                         snippet.line_numbering,
+                        sm.line_info(unannotated_line_index)
+                            .map(|info| SrcLine::new(source, info.line_index, info.start_byte)),
                     );
 
                     for (depth, style) in &multilines {
@@ -863,12 +987,14 @@ fn render_source_line(
     renderer: &Renderer,
     line_info: &AnnotatedLineInfo<'_>,
     buffer: &mut StyledBuffer,
+    sm: &SourceMap<'_>,
     width_offset: usize,
     code_offset: usize,
     max_line_num_len: usize,
     margin: Margin,
     close_window: bool,
     line_numbering: bool,
+    source: u16,
 ) -> Vec<(usize, ElementStyle)> {
     // Draw:
     //
@@ -892,6 +1018,7 @@ fn render_source_line(
         renderer,
         buffer,
         &source_string,
+        line_info.line,
         line_info.line_index,
         line_offset,
         width_offset,
@@ -899,6 +1026,8 @@ fn render_source_line(
         max_line_num_len,
         margin,
         line_numbering,
+        sm.line_info(line_info.line_index)
+            .map(|info| SrcLine::new(source, info.line_index, info.start_byte)),
     );
 
     // If there are no annotations, we are done
@@ -1482,6 +1611,7 @@ fn emit_suggestion_default(
     matches_previous_suggestion: bool,
     is_first: bool,
     is_cont: bool,
+    source: u16,
 ) {
     let buffer_offset = buffer.num_lines();
     let mut row_num = buffer_offset + usize::from(!matches_previous_suggestion);
@@ -1498,7 +1628,7 @@ fn emit_suggestion_default(
             buffer.append(row_num - 1, " ", ElementStyle::NoStyle);
         }
         let arrow = renderer.decor_style.file_start(is_first, false);
-        buffer.append(row_num - 1, arrow, ElementStyle::LineNumber);
+        buffer.append_decor(row_num - 1, arrow, ElementStyle::LineNumber, Decor::Separator);
         let mut origin = Origin::path(path.as_ref());
         origin.line = Some(loc.line);
         origin.char_column = Some(loc.char + 1);
@@ -1508,11 +1638,12 @@ fn emit_suggestion_default(
         draw_col_separator_no_space(renderer, buffer, row_num, max_line_num_len + 1);
         row_num += 1;
     } else if matches_previous_suggestion {
-        buffer.puts(
+        buffer.puts_decor(
             row_num - 1,
             max_line_num_len + 1,
             renderer.decor_style.multi_suggestion_separator(),
             ElementStyle::LineNumber,
+            Decor::Separator,
         );
     } else {
         draw_col_separator_start(renderer, buffer, row_num - 1, max_line_num_len + 1);
@@ -1546,11 +1677,12 @@ fn emit_suggestion_default(
     if lines.clone().next().is_none() {
         // Account for a suggestion to completely remove a line(s) with whitespace (#94192).
         for line in line_start.line..=line_end.line {
-            buffer.puts(
+            buffer.puts_decor(
                 row_num - 1 + line - line_start.line,
                 0,
                 &maybe_anonymized(renderer, line, max_line_num_len, suggestion.line_numbering),
                 ElementStyle::LineNumber,
+                Decor::LineNumber,
             );
             buffer.puts(
                 row_num - 1 + line - line_start.line,
@@ -1558,12 +1690,26 @@ fn emit_suggestion_default(
                 "- ",
                 ElementStyle::Removal,
             );
-            buffer.puts(
-                row_num - 1 + line - line_start.line,
-                max_line_num_len + 3,
-                &normalize_whitespace(sm.get_line(line).unwrap()),
-                ElementStyle::Removal,
-            );
+            let raw_line = sm.get_line(line).unwrap();
+            let removed = normalize_whitespace(raw_line);
+            if let Some(info) = sm.line_info(line) {
+                let provenance =
+                    SrcLine::new(source, info.line_index, info.start_byte).provenance(raw_line);
+                buffer.puts_src(
+                    row_num - 1 + line - line_start.line,
+                    max_line_num_len + 3,
+                    &removed,
+                    ElementStyle::Removal,
+                    &provenance,
+                );
+            } else {
+                buffer.puts(
+                    row_num - 1 + line - line_start.line,
+                    max_line_num_len + 3,
+                    &removed,
+                    ElementStyle::Removal,
+                );
+            }
         }
         row_num += line_end.line - line_start.line;
     }
@@ -1597,6 +1743,7 @@ fn emit_suggestion_default(
                     &file_lines,
                     is_multiline,
                     suggestion.line_numbering,
+                    source,
                 );
             }),
             // Print first unhighlighted line, "..." and last unhighlighted line, like so:
@@ -1624,16 +1771,18 @@ fn emit_suggestion_default(
                         &file_lines,
                         is_multiline,
                         suggestion.line_numbering,
+                        source,
                     );
                 }
 
                 let placeholder = renderer.decor_style.margin();
                 let padding = str_width(placeholder);
-                buffer.puts(
+                buffer.puts_decor(
                     row_num,
                     max_line_num_len.saturating_sub(padding),
                     placeholder,
                     ElementStyle::LineNumber,
+                    Decor::Fold,
                 );
                 row_num += 1;
 
@@ -1651,6 +1800,7 @@ fn emit_suggestion_default(
                         &file_lines,
                         is_multiline,
                         suggestion.line_numbering,
+                        source,
                     );
                 }
             }
@@ -1668,6 +1818,7 @@ fn emit_suggestion_default(
             &file_lines,
             is_multiline,
             suggestion.line_numbering,
+            source,
         );
     }
 
@@ -1752,11 +1903,12 @@ fn emit_suggestion_default(
     if lines.next().is_some() {
         let placeholder = renderer.decor_style.margin();
         let padding = str_width(placeholder);
-        buffer.puts(
+        buffer.puts_decor(
             row_num,
             max_line_num_len.saturating_sub(padding),
             placeholder,
             ElementStyle::LineNumber,
+            Decor::Fold,
         );
     } else {
         let row = match show_code_change {
@@ -1787,17 +1939,19 @@ fn draw_code_line(
     file_lines: &[&LineInfo<'_>],
     is_multiline: bool,
     line_numbering: bool,
+    source: u16,
 ) {
     if let DisplaySuggestion::Diff = show_code_change {
         // We need to print more than one line if the span we need to remove is multiline.
         // For more info: https://github.com/rust-lang/rust/issues/92741
         let lines_to_remove = file_lines.iter().take(file_lines.len() - 1);
         for (index, (line_to_remove, parts)) in lines_to_remove.zip(replaced_parts).enumerate() {
-            buffer.puts(
+            buffer.puts_decor(
                 *row_num - 1,
                 0,
                 &maybe_anonymized(renderer, line_num + index, max_line_num_len, line_numbering),
                 ElementStyle::LineNumber,
+                Decor::LineNumber,
             );
             buffer.puts(
                 *row_num - 1,
@@ -1806,11 +1960,18 @@ fn draw_code_line(
                 ElementStyle::Removal,
             );
             let line = normalize_whitespace(line_to_remove.line);
-            buffer.puts(
+            let provenance = SrcLine::new(
+                source,
+                line_to_remove.line_index,
+                line_to_remove.start_byte,
+            )
+            .provenance(line_to_remove.line);
+            buffer.puts_src(
                 *row_num - 1,
                 max_line_num_len + 3,
                 &line,
                 ElementStyle::NoStyle,
+                &provenance,
             );
             style_substitution_highlights(
                 parts,
@@ -1842,7 +2003,7 @@ fn draw_code_line(
                 buffer,
             );
         } else {
-            buffer.puts(
+            buffer.puts_decor(
                 *row_num - 1,
                 0,
                 &maybe_anonymized(
@@ -1852,6 +2013,7 @@ fn draw_code_line(
                     line_numbering,
                 ),
                 ElementStyle::LineNumber,
+                Decor::LineNumber,
             );
             buffer.puts(
                 *row_num - 1,
@@ -1859,11 +2021,15 @@ fn draw_code_line(
                 "- ",
                 ElementStyle::Removal,
             );
-            buffer.puts(
+            let provenance =
+                SrcLine::new(source, last_line.line_index, last_line.start_byte)
+                    .provenance(last_line.line);
+            buffer.puts_src(
                 *row_num - 1,
                 max_line_num_len + 3,
                 &normalize_whitespace(last_line.line),
                 ElementStyle::NoStyle,
+                &provenance,
             );
             style_substitution_highlights(
                 replaced_parts.last().unwrap(),
@@ -1890,11 +2056,12 @@ fn draw_code_line(
                 // 2 -     .await
                 //   |
                 // *row_num -= 1;
-                buffer.puts(
+                buffer.puts_decor(
                     *row_num,
                     0,
                     &maybe_anonymized(renderer, line_num, max_line_num_len, line_numbering),
                     ElementStyle::LineNumber,
+                    Decor::LineNumber,
                 );
                 buffer.puts(*row_num, max_line_num_len + 1, "+ ", ElementStyle::Addition);
                 buffer.append(
@@ -1905,11 +2072,12 @@ fn draw_code_line(
             }
         }
     } else if is_multiline {
-        buffer.puts(
+        buffer.puts_decor(
             *row_num,
             0,
             &maybe_anonymized(renderer, line_num, max_line_num_len, line_numbering),
             ElementStyle::LineNumber,
+            Decor::LineNumber,
         );
         match &highlight_parts {
             [SubstitutionHighlight { start: 0, end }] if *end == line_to_add.len() => {
@@ -1941,11 +2109,12 @@ fn draw_code_line(
             ElementStyle::NoStyle,
         );
     } else if let DisplaySuggestion::Add = show_code_change {
-        buffer.puts(
+        buffer.puts_decor(
             *row_num,
             0,
             &maybe_anonymized(renderer, line_num, max_line_num_len, line_numbering),
             ElementStyle::LineNumber,
+            Decor::LineNumber,
         );
         buffer.puts(*row_num, max_line_num_len + 1, "+ ", ElementStyle::Addition);
         buffer.append(
@@ -1954,11 +2123,12 @@ fn draw_code_line(
             ElementStyle::NoStyle,
         );
     } else {
-        buffer.puts(
+        buffer.puts_decor(
             *row_num,
             0,
             &maybe_anonymized(renderer, line_num, max_line_num_len, line_numbering),
             ElementStyle::LineNumber,
+            Decor::LineNumber,
         );
         draw_col_separator(renderer, buffer, *row_num, max_line_num_len + 1);
         buffer.append(
@@ -2011,6 +2181,7 @@ fn draw_line(
     renderer: &Renderer,
     buffer: &mut StyledBuffer,
     source_string: &str,
+    raw_line: &str,
     line_index: usize,
     line_offset: usize,
     width_offset: usize,
@@ -2018,6 +2189,7 @@ fn draw_line(
     max_line_num_len: usize,
     margin: Margin,
     line_numbering: bool,
+    src: Option<SrcLine>,
 ) -> usize {
     // Tabs are assumed to have been replaced by spaces in calling code.
     debug_assert!(!source_string.contains('\t'));
@@ -2028,6 +2200,7 @@ fn draw_line(
 
     let mut taken = 0;
     let mut skipped = 0;
+    let mut skipped_chars = 0;
     let code: String = source_string
         .chars()
         .skip_while(|ch| {
@@ -2038,6 +2211,7 @@ fn draw_line(
             // source lines.
             if skipped < left {
                 skipped += w;
+                skipped_chars += 1;
                 true
             } else {
                 false
@@ -2068,23 +2242,37 @@ fn draw_line(
             }
         }
 
-        buffer.puts(
+        buffer.puts_decor(
             line_offset,
             code_offset,
             placeholder,
             ElementStyle::LineNumber,
+            Decor::Fold,
         );
         (width_taken, bytes_taken)
     } else {
         (0, 0)
     };
 
-    buffer.puts(
-        line_offset,
-        code_offset + width_taken,
-        &code[bytes_taken..],
-        ElementStyle::Quotation,
-    );
+    let drawn_code = &code[bytes_taken..];
+    if let Some(src) = src {
+        let provenance = src.provenance(raw_line);
+        let start = skipped_chars + code[..bytes_taken].chars().count();
+        buffer.puts_src(
+            line_offset,
+            code_offset + width_taken,
+            drawn_code,
+            ElementStyle::Quotation,
+            &provenance[start..start + drawn_code.chars().count()],
+        );
+    } else {
+        buffer.puts(
+            line_offset,
+            code_offset + width_taken,
+            drawn_code,
+            ElementStyle::Quotation,
+        );
+    }
 
     if line_len > right {
         // We have stripped some code/whitespace from the beginning, make it clear.
@@ -2099,19 +2287,21 @@ fn draw_line(
             }
         }
 
-        buffer.puts(
+        buffer.puts_decor(
             line_offset,
             code_offset + width_taken + code[bytes_taken..].chars().count() - char_taken,
             placeholder,
             ElementStyle::LineNumber,
+            Decor::Fold,
         );
     }
 
-    buffer.puts(
+    buffer.puts_decor(
         line_offset,
         0,
         &maybe_anonymized(renderer, line_index, max_line_num_len, line_numbering),
         ElementStyle::LineNumber,
+        Decor::LineNumber,
     );
 
     draw_col_separator_no_space(renderer, buffer, line_offset, width_offset - 2);
@@ -2159,12 +2349,21 @@ fn draw_multiline_line(
             }
         }
     };
-    buffer.putc(line, offset + depth - 1, chr, style);
+    buffer.putc_meta(line, offset + depth - 1, chr, style, CharMeta {
+        source: None,
+        decor: Decor::Sidebar(u16::try_from(depth).unwrap_or(u16::MAX)),
+    });
 }
 
 fn draw_col_separator(renderer: &Renderer, buffer: &mut StyledBuffer, line: usize, col: usize) {
     let chr = renderer.decor_style.col_separator();
-    buffer.puts(line, col, &format!("{chr} "), ElementStyle::LineNumber);
+    buffer.puts_decor(
+        line,
+        col,
+        &format!("{chr} "),
+        ElementStyle::LineNumber,
+        Decor::Sidebar(0),
+    );
 }
 
 fn draw_col_separator_no_space(
@@ -2249,7 +2448,10 @@ fn draw_col_separator_no_space_with_style(
     col: usize,
     style: ElementStyle,
 ) {
-    buffer.putc(line, col, chr, style);
+    buffer.putc_meta(line, col, chr, style, CharMeta {
+        source: None,
+        decor: Decor::Sidebar(0),
+    });
 }
 
 fn maybe_anonymized(
@@ -2278,7 +2480,7 @@ fn draw_note_separator(
     is_cont: bool,
 ) {
     let chr = renderer.decor_style.note_separator(is_cont);
-    buffer.puts(line, col, chr, ElementStyle::LineNumber);
+    buffer.puts_decor(line, col, chr, ElementStyle::LineNumber, Decor::Separator);
 }
 
 fn draw_line_separator(renderer: &Renderer, buffer: &mut StyledBuffer, line: usize, col: usize) {
@@ -2286,7 +2488,7 @@ fn draw_line_separator(renderer: &Renderer, buffer: &mut StyledBuffer, line: usi
         DecorStyle::Ascii => (0, "..."),
         DecorStyle::Unicode => (col - 2, "┆"),
     };
-    buffer.puts(line, column, dots, ElementStyle::LineNumber);
+    buffer.puts_decor(line, column, dots, ElementStyle::LineNumber, Decor::Fold);
 }
 
 trait MessageOrTitle {

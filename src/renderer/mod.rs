@@ -22,11 +22,13 @@ pub(crate) mod graphics;
 pub(crate) mod source_map;
 pub(crate) mod stylesheet;
 
+mod events;
 mod margin;
 mod preprocess;
 mod styled_buffer;
 
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use crate::Report;
 
@@ -37,6 +39,7 @@ pub(crate) use graphics::{LineAnnotation, LineAnnotationType, char_width, num_ov
 pub(crate) use stylesheet::Stylesheet;
 
 pub use anstyle::*;
+pub use events::{Event, EventKind, SourceRef};
 
 /// See [`Renderer::term_width`]
 pub const DEFAULT_TERM_WIDTH: usize = 140;
@@ -230,6 +233,70 @@ impl Renderer {
     /// Render a diagnostic [`Report`]
     pub fn render(&self, groups: Report<'_>) -> String {
         graphics::render(self, groups)
+    }
+
+    /// Render a diagnostic [`Report`] as structured [`Event`]s
+    ///
+    /// This exposes the exact same layout as [`Renderer::render`] — both are
+    /// produced from a single shared layout pass, so they cannot drift
+    /// apart — as data that consumers like editors can present themselves
+    /// instead of parsing terminal text back apart.
+    ///
+    /// Each [`Event`] carries its visible text, resolved style, output
+    /// position, semantic [`EventKind`], and — for text quoted from the
+    /// original source — a [`SourceRef`] with both byte offsets and display
+    /// columns. Decorative characters (gutters, underlines, elision markers,
+    /// suggested text, ...) have no [`source`][Event::source].
+    ///
+    /// Styling configuration ([`Renderer::styled`] vs [`Renderer::plain`])
+    /// only affects [`Event::style`]; event splitting and positions are
+    /// identical either way.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use annotate_snippets::*;
+    /// # use annotate_snippets::renderer::*;
+    /// let report = &[Group::with_title(Level::ERROR.primary_title("mismatched types"))
+    ///     .element(
+    ///         Snippet::source("let x: u32 = \"hi\";")
+    ///             .path("src/main.rs")
+    ///             .annotation(AnnotationKind::Primary.span(13..17).label("expected `u32`")),
+    ///     )];
+    ///
+    /// let renderer = Renderer::plain();
+    /// let events = renderer.render_events(report);
+    /// let quoted: Vec<_> = events
+    ///     .iter()
+    ///     .filter(|e| e.kind == EventKind::Source)
+    ///     .map(|e| (e.text.as_str(), e.source.as_ref().unwrap().byte_range.clone()))
+    ///     .collect();
+    /// assert_eq!(quoted, [("let x: u32 = \"hi\";", 0..18)]);
+    /// ```
+    pub fn render_events(&self, groups: Report<'_>) -> Vec<Event> {
+        let mut events = Vec::new();
+        self.render_events_with(groups, &mut |event| events.push(event));
+        events
+    }
+
+    /// [`Renderer::render_events`], streaming each [`Event`] to `sink` as it
+    /// is produced, without first materializing the full output
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use annotate_snippets::*;
+    /// # use annotate_snippets::renderer::*;
+    /// let report = &[Group::with_title(Level::ERROR.primary_title("oops"))];
+    ///
+    /// let renderer = Renderer::plain();
+    /// let mut count = 0;
+    /// renderer.render_events_with(report, &mut |_event| count += 1);
+    /// assert_eq!(count, renderer.render_events(report).len());
+    /// ```
+    pub fn render_events_with(&self, groups: Report<'_>, sink: &mut dyn FnMut(Event)) {
+        let rendered = graphics::render_all(self, groups);
+        events::emit_events(self, &rendered, sink);
     }
 }
 

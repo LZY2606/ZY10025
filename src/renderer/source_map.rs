@@ -61,6 +61,10 @@ impl<'a> SourceMap<'a> {
             .map(|info| info.line)
     }
 
+    pub(crate) fn line_info(&self, idx: usize) -> Option<&LineInfo<'a>> {
+        self.lines.iter().find(|l| l.line_index == idx)
+    }
+
     pub(crate) fn span_to_locations(&self, span: Range<usize>) -> (Loc, Loc) {
         let start_info = self
             .lines

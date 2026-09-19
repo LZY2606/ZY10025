@@ -1,0 +1,65 @@
+<svg width="1222px" height="416px" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .fg { fill: #AAAAAA }
+    .bg { fill: #000000 }
+    .container {
+      padding: 0 10px;
+      line-height: 18px;
+    }
+    tspan {
+      font: 14px SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace;
+      white-space: pre;
+      line-height: 18px;
+    }
+  </style>
+
+  <rect width="100%" height="100%" y="0" rx="4.5" class="bg" />
+
+  <text xml:space="preserve" class="container fg">
+    <tspan x="10px" y="28px"><tspan>[</tspan>
+</tspan>
+    <tspan x="10px" y="46px"><tspan>  {"line":0,"column":0,"text":"error[E0308]","kind":"title"},</tspan>
+</tspan>
+    <tspan x="10px" y="64px"><tspan>  {"line":0,"column":12,"text":": mismatched types","kind":"title"},</tspan>
+</tspan>
+    <tspan x="10px" y="82px"><tspan>  {"line":1,"column":0,"text":" ","kind":"text"},</tspan>
+</tspan>
+    <tspan x="10px" y="100px"><tspan>  {"line":1,"column":1,"text":"--&gt; ","kind":"separator"},</tspan>
+</tspan>
+    <tspan x="10px" y="118px"><tspan>  {"line":1,"column":5,"text":"src/main.rs:1:14","kind":"origin"},</tspan>
+</tspan>
+    <tspan x="10px" y="136px"><tspan>  {"line":2,"column":0,"text":"  ","kind":"text"},</tspan>
+</tspan>
+    <tspan x="10px" y="154px"><tspan>  {"line":2,"column":2,"text":"|","kind":"sidebar"},</tspan>
+</tspan>
+    <tspan x="10px" y="172px"><tspan>  {"line":3,"column":0,"text":"1","kind":"line_number"},</tspan>
+</tspan>
+    <tspan x="10px" y="190px"><tspan>  {"line":3,"column":1,"text":" ","kind":"text"},</tspan>
+</tspan>
+    <tspan x="10px" y="208px"><tspan>  {"line":3,"column":2,"text":"|","kind":"sidebar"},</tspan>
+</tspan>
+    <tspan x="10px" y="226px"><tspan>  {"line":3,"column":3,"text":" ","kind":"text"},</tspan>
+</tspan>
+    <tspan x="10px" y="244px"><tspan>  {"line":3,"column":4,"text":"let x: u32 = \"hi\";","kind":"source","source":{"path":"src/main.rs","line":1,"bytes":[0,18],"columns":[0,18]}},</tspan>
+</tspan>
+    <tspan x="10px" y="262px"><tspan>  {"line":4,"column":0,"text":"  ","kind":"text"},</tspan>
+</tspan>
+    <tspan x="10px" y="280px"><tspan>  {"line":4,"column":2,"text":"|","kind":"sidebar"},</tspan>
+</tspan>
+    <tspan x="10px" y="298px"><tspan>  {"line":4,"column":3,"text":"              ","kind":"text"},</tspan>
+</tspan>
+    <tspan x="10px" y="316px"><tspan>  {"line":4,"column":17,"text":"^^^^","kind":"underline"},</tspan>
+</tspan>
+    <tspan x="10px" y="334px"><tspan>  {"line":4,"column":21,"text":" ","kind":"text"},</tspan>
+</tspan>
+    <tspan x="10px" y="352px"><tspan>  {"line":4,"column":22,"text":"expected `u32`","kind":"label"}</tspan>
+</tspan>
+    <tspan x="10px" y="370px"><tspan>]</tspan>
+</tspan>
+    <tspan x="10px" y="388px">
+</tspan>
+    <tspan x="10px" y="406px">
+</tspan>
+  </text>
+
+</svg>

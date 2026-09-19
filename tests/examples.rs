@@ -84,6 +84,13 @@ fn struct_name_as_context() {
     assert_example(target, expected);
 }
 
+#[test]
+fn structured() {
+    let target = "structured";
+    let expected = snapbox::file!["../examples/structured.svg": TermSvg];
+    assert_example(target, expected);
+}
+
 #[track_caller]
 fn assert_example(target: &str, expected: snapbox::Data) {
     let bin_path = snapbox::cmd::compile_example(target, ["--features=testing-colors"]).unwrap();

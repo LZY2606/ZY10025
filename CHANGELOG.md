@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 <!-- next-header -->
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- `Renderer::render_events` and `Renderer::render_events_with` render a `Report` as a structured `Event` stream (text, style, kind, output position, and source byte/column ranges) sharing the exact same layout as `Renderer::render`
+
 ## [0.12.16] - 2026-05-06
 
 ### Fixed
